@@ -1,0 +1,45 @@
+{
+  "copilot": {
+    "class_name": "CopilotAPI",
+    "api_key": "",
+    "endpoint": ""
+  },
+  "claude": {
+    "class_name": "ClaudeAPI",
+    "api_key": "claude-api-key",
+    "endpoint": "https://api.anthropic.com"
+  },
+  "gemini": {
+    "class_name": "GeminiAPI",
+    "api_key": "gemini-api-key",
+    "model": "gemini-2.0-flash-exp"
+  },
+  "openai": {
+    "class_name": "OpenAIAPI",
+    "api_key": "openai-api-key",
+    "model": "gpt-4o"
+  },
+  "bedrock_claude": {
+    "class_name": "BedrockClaudeAPI",
+    "aws": {
+      "profile_name": "profile_name",
+      "region_name": "us-east-1",
+      "iam_role": "arn:aws:iam::project_id:role/profile_name-role"
+    },
+    "model_id": "anthropic.claude-3-sonnet-20240229-v1:0"
+  },
+  "bedrock_claude_advanced": {
+    "class_name": "BedrockClaudeAdvancedAPI",
+    "aws": {
+      "profile_name": "profile_name",
+      "region_name": "us-east-1",
+      "iam_role": "arn:aws:iam::project_id:role/profile_name-role"
+    },
+    "model_id": "anthropic.claude-3-5-sonnet-20240620-v1:0"
+  },
+  "ollama": {
+    "class_name": "OllamaAPI",
+    "base_url": "http://localhost:11434",
+    "model": "qwen2.5-coder:14b"
+  }
+}
