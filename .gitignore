@@ -1,2 +1,3 @@
 conversations/
-
+__pycache__/
+*.pyc
