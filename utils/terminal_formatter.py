@@ -17,6 +17,9 @@ class TerminalFormatter:
     HELP_COLOR = Fore.BLUE
     DIVIDER_COLOR = Fore.YELLOW
     PROMPT_COLOR = Fore.CYAN
+    USER_COLOR = Fore.BLUE + Style.BRIGHT
+    MODEL_COLOR = Fore.CYAN + Style.BRIGHT
+    TIMESTAMP_COLOR = Fore.WHITE + Style.DIM
 
     @staticmethod
     def format_api_name(api_name):
@@ -56,3 +59,18 @@ class TerminalFormatter:
     def format_prompt(prompt):
         """Format input prompt with color."""
         return f"{TerminalFormatter.PROMPT_COLOR}{prompt}{Style.RESET_ALL}"
+    
+    @staticmethod
+    def format_user_message(message, timestamp):
+        """Format user message with color and timestamp."""
+        return f"{TerminalFormatter.USER_COLOR}[User]: {message}{Style.RESET_ALL}\n{TerminalFormatter.TIMESTAMP_COLOR}{timestamp}{Style.RESET_ALL}"
+    
+    @staticmethod
+    def format_model_message(message, model_name, timestamp):
+        """Format model response with color and timestamp."""
+        return f"{TerminalFormatter.MODEL_COLOR}[{model_name}]: {message}{Style.RESET_ALL}\n{TerminalFormatter.TIMESTAMP_COLOR}{timestamp}{Style.RESET_ALL}"
+    
+    @staticmethod
+    def format_separator():
+        """Format visual separator between Q-A pairs."""
+        return f"{TerminalFormatter.DIVIDER_COLOR}{'=' * 70}{Style.RESET_ALL}"

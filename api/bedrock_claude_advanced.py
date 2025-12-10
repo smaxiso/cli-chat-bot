@@ -35,7 +35,7 @@ class BedrockClaudeAdvancedAPI:
     - Streaming support (optional)
     """
     
-    def __init__(self, config, debug=False, conversation_manager=None):
+    def __init__(self, config, debug=False, conversation_manager=None, cache=None):
         """
         Initialize the advanced Bedrock API.
         
@@ -52,9 +52,11 @@ class BedrockClaudeAdvancedAPI:
                    }
             debug: Enable debug logging
             conversation_manager: Optional shared ConversationManager instance
+            cache: Optional ResponseCache instance for response caching
         """
         self.logger = setup_logger(__name__, debug=debug)
         self.debug = debug
+        self.cache = cache
         
         # Convert config format to match bedrock_api format
         bedrock_config = self._convert_config(config)
@@ -132,12 +134,48 @@ class BedrockClaudeAdvancedAPI:
         if use_history is None:
             use_history = self.use_history
         
+        # Get conversation ID for per-conversation caching (much faster than hashing history)
+        conversation_id = getattr(self, '_conversation_id', None)
+        
+        # Check cache first
+        if self.cache:
+            cached = self.cache.get(
+                query=prompt,
+                conversation_id=conversation_id,  # Per-conversation caching (fast!)
+                model_id=self.client.model_id,
+                temperature=self.client.default_temperature,
+                max_tokens=self.client.default_max_tokens
+            )
+            
+            if cached:
+                if debug or self.debug:
+                    self.logger.debug("Cache hit for query")
+                # Still need to add to conversation history even on cache hit
+                if use_history and self.conversation_manager:
+                    self.conversation_manager.add_user_message(prompt)
+                    self.conversation_manager.add_assistant_message(cached)
+                return cached, True  # (response, is_cached)
+        
+        # Cache miss - call API
         try:
             result = self.client.get_response(
                 prompt=prompt,
                 use_history=use_history,
                 debug=debug or self.debug
             )
+            
+            response_text = result.get('response', '')
+            
+            # Store in cache (per-conversation, fast!)
+            if self.cache and response_text:
+                self.cache.set(
+                    query=prompt,
+                    response=response_text,
+                    conversation_id=conversation_id,  # Per-conversation caching
+                    model_id=self.client.model_id,
+                    temperature=self.client.default_temperature,
+                    max_tokens=self.client.default_max_tokens
+                )
             
             # Track session usage
             usage = result.get('usage', {})
@@ -163,12 +201,12 @@ class BedrockClaudeAdvancedAPI:
                     f"Cost: ${cost:.6f if cost else 0}"
                 )
             
-            return result.get('response', '')
+            return response_text, False  # (response, is_cached)
             
         except Exception as e:
             error_msg = f"Bedrock API Error: {str(e)}"
             self.logger.error(error_msg)
-            return error_msg
+            return error_msg, False  # (response, is_cached)
     
     def get_response_stream(self, prompt, debug=False, use_history=None):
         """

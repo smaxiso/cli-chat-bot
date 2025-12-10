@@ -19,6 +19,6 @@ class ClaudeAPI:
                 system="You are an AI assistant. Provide clear and concise answers.",
                 messages=[{"role": "user", "content": [{"type": "text", "text": prompt}]}]
             )
-            return message.content
+            return message.content, False
         except Exception as e:
-            return f"Error: {e}"
+            return f"Error: {e}", False

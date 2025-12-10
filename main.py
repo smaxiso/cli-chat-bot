@@ -8,6 +8,7 @@ from utils.tts_manager import TTSManager
 from utils.util_methods import UtilMethods
 from utils.config_reader import ConfigReader
 from utils.terminal_formatter import TerminalFormatter
+from colorama import Style
 
 # Add bedrock_api to path to import ConversationManager
 bedrock_api_path = os.path.join(os.path.dirname(__file__), 'bedrock_api')
@@ -20,11 +21,17 @@ except ImportError:
     ConversationManager = None
     logging.warning("ConversationManager not available - conversation context will not be shared across APIs")
 
+try:
+    from services.response_cache import ResponseCache
+except ImportError:
+    ResponseCache = None
+    logging.warning("ResponseCache not available - response caching will be disabled")
+
 
 class AIChatbot:
     """AI Chatbot with support for multiple APIs and TTS."""
 
-    def __init__(self, api_name=None, enable_tts=False, debug=False, rate=150, volume=0.5, enable_stream=True, model=None):
+    def __init__(self, api_name=None, enable_tts=False, debug=False, rate=150, volume=0.5, enable_stream=True, model=None, enable_cache=False):
         """Initialize the chatbot, prompting for API selection if needed."""
         self.api_name = None
         self.api_config = None
@@ -43,6 +50,10 @@ class AIChatbot:
         self.current_conversation_name = None
         self.current_conversation_file = None
 
+        # Cache directory (separate from conversations)
+        self.cache_dir = os.path.join(os.path.dirname(__file__), "cache")
+        os.makedirs(self.cache_dir, exist_ok=True)
+
         # Create shared ConversationManager for all APIs
         # This ensures conversation context is preserved across API switches
         if ConversationManager:
@@ -54,6 +65,29 @@ class AIChatbot:
             )
         else:
             self.shared_conversation_manager = None
+
+        # Create shared ResponseCache for all APIs
+        # This enables response caching (per-conversation, not context-aware)
+        # Can be enabled via --cache argument or /cache-on command
+        self.cache_enabled = enable_cache  # Default: disabled
+        
+        if ResponseCache and self.cache_enabled:
+            cache_file = os.path.join(self.cache_dir, "response_cache.json")
+            self.response_cache = ResponseCache(
+                ttl_hours=24,
+                max_size=1000,
+                persistent=True,
+                cache_file=cache_file
+            )
+            if self.debug:
+                logging.info(f"ResponseCache initialized: {cache_file}")
+        else:
+            self.response_cache = None
+            if self.debug:
+                if not ResponseCache:
+                    logging.warning("ResponseCache not available - caching disabled")
+                elif not self.cache_enabled:
+                    logging.info("ResponseCache disabled by user")
 
         # Store API instances to preserve conversation context when switching
         self.api_instances = {}  # Maps api_name -> api_instance
@@ -101,29 +135,55 @@ class AIChatbot:
             # Try to initialize with shared conversation manager
             api_class = self.API_CLASSES[api_name]
             
-            # Check if API class accepts conversation_manager parameter
+            # Check if API class accepts parameters
             import inspect
             sig = inspect.signature(api_class.__init__)
             
+            # Build initialization arguments
+            init_kwargs = {}
+            
+            # Add debug if API supports it
+            if 'debug' in sig.parameters:
+                init_kwargs['debug'] = self.debug
+            
+            # Add conversation_manager if API supports it
             if self.shared_conversation_manager and 'conversation_manager' in sig.parameters:
-                # API accepts conversation_manager, pass it
-                self.api_instance = api_class(self.api_config, conversation_manager=self.shared_conversation_manager)
-            elif self.shared_conversation_manager and 'debug' in sig.parameters and 'conversation_manager' in sig.parameters:
-                # API accepts both debug and conversation_manager
-                self.api_instance = api_class(self.api_config, debug=self.debug, conversation_manager=self.shared_conversation_manager)
+                init_kwargs['conversation_manager'] = self.shared_conversation_manager
+            
+            # Add cache if API supports it
+            if self.response_cache and 'cache' in sig.parameters:
+                init_kwargs['cache'] = self.response_cache
+            
+            # Initialize API instance
+            if init_kwargs:
+                self.api_instance = api_class(self.api_config, **init_kwargs)
             else:
-                # API doesn't accept conversation_manager, initialize normally
-                if 'debug' in sig.parameters:
-                    self.api_instance = api_class(self.api_config, debug=self.debug)
-                else:
-                    self.api_instance = api_class(self.api_config)
-                
-                # Try to set conversation_manager as attribute after initialization
-                if self.shared_conversation_manager:
-                    if hasattr(self.api_instance, 'conversation_manager'):
-                        self.api_instance.conversation_manager = self.shared_conversation_manager
-                    elif hasattr(self.api_instance, 'client') and hasattr(self.api_instance.client, 'conversation_manager'):
-                        self.api_instance.client.conversation_manager = self.shared_conversation_manager
+                self.api_instance = api_class(self.api_config)
+            
+            # Try to set conversation_manager as attribute after initialization if not passed
+            if self.shared_conversation_manager and 'conversation_manager' not in init_kwargs:
+                if hasattr(self.api_instance, 'conversation_manager'):
+                    self.api_instance.conversation_manager = self.shared_conversation_manager
+                elif hasattr(self.api_instance, 'client') and hasattr(self.api_instance.client, 'conversation_manager'):
+                    self.api_instance.client.conversation_manager = self.shared_conversation_manager
+            
+            # Try to set cache as attribute after initialization if not passed
+            if self.response_cache and 'cache' not in init_kwargs:
+                if hasattr(self.api_instance, 'cache'):
+                    self.api_instance.cache = self.response_cache
+                elif hasattr(self.api_instance, 'client') and hasattr(self.api_instance.client, 'cache'):
+                    self.api_instance.client.cache = self.response_cache
+            
+            # Set conversation_id for per-conversation caching
+            # Always set it, even if current_conversation_name is None (will use "default" in cache)
+            conversation_id = self.current_conversation_name or "default"
+            if hasattr(self.api_instance, '_conversation_id'):
+                self.api_instance._conversation_id = conversation_id
+            elif hasattr(self.api_instance, 'client') and hasattr(self.api_instance.client, '_conversation_id'):
+                self.api_instance.client._conversation_id = conversation_id
+            
+            if self.debug:
+                logging.debug(f"Set conversation_id on {api_name} API instance: {conversation_id}")
             
             # Store instance to preserve context when switching back
             self.api_instances[api_name] = self.api_instance
@@ -236,6 +296,12 @@ class AIChatbot:
         # Sanitize name for filename
         safe_name = "".join(c for c in name if c.isalnum() or c in ('-', '_', ' ')).strip()
         safe_name = safe_name.replace(' ', '_')
+        
+        # Prevent conflicts with cache file
+        cache_filename = "response_cache.json"
+        if f"{safe_name}.json" == cache_filename:
+            safe_name = f"{safe_name}_conv"  # Append _conv to avoid conflict
+        
         return os.path.join(self.conversations_dir, f"{safe_name}.json")
     
     def _list_conversations(self) -> List[Dict]:
@@ -245,9 +311,16 @@ class AIChatbot:
         if not os.path.exists(self.conversations_dir):
             return conversations
         
+        # Exclude cache directory and any subdirectories
+        cache_dir_name = os.path.basename(self.cache_dir)
+        
         for filename in os.listdir(self.conversations_dir):
+            # Skip directories (like cache directory if it somehow ends up here)
+            filepath = os.path.join(self.conversations_dir, filename)
+            if os.path.isdir(filepath):
+                continue
+            
             if filename.endswith('.json'):
-                filepath = os.path.join(self.conversations_dir, filename)
                 try:
                     # Try to load to get metadata
                     manager = ConversationManager.load_from_file(filepath)
@@ -286,6 +359,9 @@ class AIChatbot:
         # Update all existing API instances to use the new conversation manager
         self._update_all_api_instances_conversation_manager()
         
+        # Update conversation_id for all API instances (for per-conversation caching)
+        self._update_all_api_instances_conversation_id()
+        
         # Save empty conversation
         if self.shared_conversation_manager:
             self._save_current_conversation()
@@ -313,6 +389,9 @@ class AIChatbot:
                 
                 # Update all existing API instances to use the loaded conversation manager
                 self._update_all_api_instances_conversation_manager()
+                
+                # Update conversation_id for all API instances (for per-conversation caching)
+                self._update_all_api_instances_conversation_id()
             else:
                 print(TerminalFormatter.format_error(f"Failed to load conversation '{name}'. Starting new one."))
                 self._start_new_conversation(name)
@@ -342,6 +421,20 @@ class AIChatbot:
             if hasattr(api_instance, '_bedrock_client') and hasattr(api_instance._bedrock_client, '_conversation_manager'):
                 api_instance._bedrock_client._conversation_manager = self.shared_conversation_manager
     
+    def _update_all_api_instances_conversation_id(self):
+        """Update all existing API instances with current conversation ID for per-conversation caching."""
+        conversation_id = self.current_conversation_name or "default"
+        
+        for api_name, api_instance in self.api_instances.items():
+            # Set conversation_id for per-conversation caching
+            if hasattr(api_instance, '_conversation_id'):
+                api_instance._conversation_id = conversation_id
+            elif hasattr(api_instance, 'client') and hasattr(api_instance.client, '_conversation_id'):
+                api_instance.client._conversation_id = conversation_id
+        
+        if self.debug:
+            logging.debug(f"Updated conversation_id on all API instances: {conversation_id}")
+    
     def _save_current_conversation(self):
         """Save current conversation to disk."""
         if self.shared_conversation_manager and self.current_conversation_file:
@@ -364,11 +457,12 @@ class AIChatbot:
                     print(TerminalFormatter.format_system_message("\nCommands: Type /help for available commands"))
                     print(TerminalFormatter.format_system_message(f"Streaming: {'ON' if self.enable_stream else 'OFF'}"))
                     print(TerminalFormatter.format_system_message(f"Text-to-Speech: {'ON' if self.enable_tts else 'OFF'}"))
-                    formatted_prompt = TerminalFormatter.format_api_name(self.api_name) + " Enter your query: "
-                    query = input(formatted_prompt).strip()
-                else:
-                    formatted_prompt = TerminalFormatter.format_api_name(self.api_name) + " Enter your query: "
-                    query = input(formatted_prompt).strip()
+                
+                # Add separator before user input
+                print(TerminalFormatter.format_separator())
+                
+                # Capture input with [User]: prefix (user types directly after prefix)
+                query = input(f"{TerminalFormatter.USER_COLOR}[User]: {Style.RESET_ALL}").strip()
 
                 if not query:
                     empty_input_count += 1
@@ -462,6 +556,7 @@ class AIChatbot:
                     continue
 
                 if query_clean == '/stats':
+                    # Show conversation statistics
                     if hasattr(self.api_instance, 'get_conversation_stats'):
                         stats = self.api_instance.get_conversation_stats()
                         print("\n" + "=" * 70)
@@ -482,9 +577,35 @@ class AIChatbot:
                         print(f"Session Total tokens:  {stats.get('session_total_tokens', 0):,}")
                         if stats.get('session_total_cost', 0) > 0:
                             print(f"Session Total cost: ${stats.get('session_total_cost', 0):.6f}")
-                        print("=" * 70 + "\n")
+                        print("=" * 70)
                     else:
                         print(TerminalFormatter.format_system_message("\nConversation statistics not available for this API.\n"))
+                    
+                    # Show cache statistics
+                    if self.response_cache:
+                        cache_stats = self.response_cache.get_stats()
+                        print("\n" + "=" * 70)
+                        print("Response Cache Statistics")
+                        print("=" * 70)
+                        print(f"Total entries: {cache_stats['total_entries']}")
+                        print(f"Valid entries: {cache_stats['valid_entries']}")
+                        print(f"Expired entries: {cache_stats['expired_entries']}")
+                        print(f"Max size: {cache_stats['max_size']}")
+                        print(f"TTL: {cache_stats['ttl_hours']} hours")
+                        print(f"\nCache hits: {cache_stats['hits']}")
+                        print(f"Cache misses: {cache_stats['misses']}")
+                        print(f"Hit rate: {cache_stats['hit_rate_percent']}%")
+                        print(f"Total sets: {cache_stats['sets']}")
+                        print(f"Evictions: {cache_stats['evictions']}")
+                        print("=" * 70 + "\n")
+                    continue
+                
+                if query_clean == '/cache-clear':
+                    if self.response_cache:
+                        self.response_cache.clear()
+                        print(TerminalFormatter.format_system_message("\n✓ Response cache cleared.\n"))
+                    else:
+                        print(TerminalFormatter.format_error("\nResponse cache is not available.\n"))
                     continue
 
                 if query_clean == '/clear':
@@ -570,18 +691,38 @@ class AIChatbot:
                         print(TerminalFormatter.format_error("\nError: Please provide a new name. Example: /rename-chat new-name\n"))
                     continue
 
-                # Echo the query with formatting
-                print(TerminalFormatter.format_query(f"\nYour query: {query}"))
-
                 if self.tts_manager:
                     self.tts_manager.stop_tts()
 
-                # Get response with streaming support
-                response = self._get_response_with_streaming(query)
+                # Display timestamp (input already shown with [User]: prefix)
+                user_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                print(f"{TerminalFormatter.TIMESTAMP_COLOR}{user_timestamp}{Style.RESET_ALL}")
+                print()  # New line after user message
                 
-                # Only print formatted response if not streaming (streaming already printed)
-                if not (self.enable_stream and hasattr(self.api_instance, 'get_response_stream')):
-                    print(TerminalFormatter.format_response(response, self.api_name))
+                # Get response with streaming support
+                api_name_display = self.api_name.capitalize()
+                
+                try:
+                    # Check if streaming will be used
+                    is_streaming = self.enable_stream and hasattr(self.api_instance, 'get_response_stream')
+                    
+                    response, is_cached = self._get_response_with_streaming(query)
+                    
+                    # Format and display model response with timestamp
+                    # Only format if NOT streaming (streaming already printed with prefix and timestamp)
+                    if not is_streaming or is_cached:
+                        model_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        model_name = api_name_display
+                        if is_cached:
+                            model_name += " (cached)"
+                        print(TerminalFormatter.format_model_message(response, model_name, model_timestamp))
+                    
+                    # Add separator at the end (for both streaming and non-streaming)
+                    print(TerminalFormatter.format_separator())
+                    print()  # New line after separator
+                    print()  # Extra line for spacing before next Q-A pair
+                except Exception as e:
+                    raise
 
                 # Auto-save conversation after each exchange
                 if self.shared_conversation_manager:
@@ -605,17 +746,34 @@ class AIChatbot:
             query: User query
         
         Returns:
-            str: Complete response text
+            tuple: (response_text, is_cached) - Complete response text and cache status
         """
         # Check if API supports streaming
         if self.enable_stream and hasattr(self.api_instance, 'get_response_stream'):
             try:
-                # Use streaming if available
-                response_text = ""
-                print("\n" + "=" * 70)
-                print(f"{self.api_name.capitalize()} Response:")
-                print("=" * 70)
+                # For streaming, check cache first to avoid unnecessary API calls
+                # If cached, return immediately (don't stream cached responses)
+                if hasattr(self.api_instance, 'cache') and self.api_instance.cache:
+                    conversation_id = getattr(self.api_instance, '_conversation_id', "default")
+                    cached = self.api_instance.cache.get(
+                        query=query,
+                        conversation_id=conversation_id,
+                        model_id=self.api_instance.model,
+                        temperature=0.7
+                    )
+                    if cached:
+                        # Add to conversation history for cached response
+                        if hasattr(self.api_instance, 'conversation_manager') and self.api_instance.conversation_manager:
+                            self.api_instance.conversation_manager.add_user_message(query)
+                            self.api_instance.conversation_manager.add_assistant_message(cached)
+                        return cached, True
                 
+                # Cache miss - proceed with streaming
+                # Start streaming with model name prefix
+                api_name_display = self.api_name.capitalize()
+                print(f"{TerminalFormatter.MODEL_COLOR}[{api_name_display}]: {Style.RESET_ALL}", end="", flush=True)
+                
+                response_text = ""
                 for event in self.api_instance.get_response_stream(query, debug=self.debug):
                     if 'chunk' in event:
                         chunk = event['chunk']
@@ -625,15 +783,19 @@ class AIChatbot:
                         usage = event['usage']
                         logging.debug(f"Token usage: {usage}")
                 
-                print("\n" + "=" * 70)
-                return response_text
+                # Add timestamp after streaming completes
+                model_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                print(f"\n{TerminalFormatter.TIMESTAMP_COLOR}{model_timestamp}{Style.RESET_ALL}")
+                return response_text, False
             except Exception as e:
                 logging.warning(f"Streaming failed, falling back to non-streaming: {e}")
                 # Fall back to non-streaming
-                return self.api_instance.get_response(query, debug=self.debug)
+                response, is_cached = self.api_instance.get_response(query, debug=self.debug)
+                return response, is_cached
         else:
             # Non-streaming mode
-            return self.api_instance.get_response(query, debug=self.debug)
+            response, is_cached = self.api_instance.get_response(query, debug=self.debug)
+            return response, is_cached
 
     @staticmethod
     def show_help():
@@ -651,13 +813,17 @@ class AIChatbot:
     - /switch-chat <name>  - Switch to different conversation
     - /list-chats          - List all saved conversations
     - /rename-chat <name>  - Rename current conversation
-    - /stats               - Show conversation statistics (bedrock_claude_advanced only)
-    - /clear               - Clear conversation history (bedrock_claude_advanced only)
+    - /stats               - Show conversation and cache statistics
+    - /cache-clear         - Clear response cache
+    - /cache-off, /no-cache - Disable response caching
+    - /cache-on, /cache     - Enable response caching
+    - /clear               - Clear conversation history
 
     Command-line arguments:
     - --api <name>         - Select AI API
     - --tts                - Enable text-to-speech (TTS is OFF by default)
     - --no-stream          - Disable streaming (streaming is ON by default)
+    - --cache               - Enable response caching (caching is OFF by default)
     - --debug              - Enable verbose logging
     - --model <model_id>   - Specify model (for APIs that support multiple models)
 
@@ -691,6 +857,7 @@ if __name__ == "__main__":
     parser.add_argument("--rate", type=int, default=150, help="Set TTS rate (default 150).")
     parser.add_argument("--volume", type=float, default=0.5, help="Set TTS volume (default 0.5).")
     parser.add_argument("--model", type=str, help="Specify the model to use (overrides config)")
+    parser.add_argument("--cache", action="store_true", dest="enable_cache", help="Enable response caching (caching is disabled by default).")
 
     args = parser.parse_args()
 
@@ -701,6 +868,7 @@ if __name__ == "__main__":
         debug=args.debug,
         rate=args.rate,
         volume=args.volume,
-        model=args.model
+        model=args.model,
+        enable_cache=args.enable_cache
     )
     chatbot.run()

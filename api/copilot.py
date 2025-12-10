@@ -23,12 +23,12 @@ class CopilotAPI:
 
                 # Extract explanation
                 match = re.search(r"Explanation:\s*(.*)", raw_output, re.DOTALL)
-                return match.group(1).strip() if match else "No explanation found."
+                return (match.group(1).strip() if match else "No explanation found."), False
             else:
-                return f"Error: {result.stderr.strip()}"
+                return f"Error: {result.stderr.strip()}", False
         except FileNotFoundError:
-            return "Error: GitHub CLI ('gh') not found. Install and configure it."
+            return "Error: GitHub CLI ('gh') not found. Install and configure it.", False
         except subprocess.TimeoutExpired:
-            return "Error: Copilot command timed out."
+            return "Error: Copilot command timed out.", False
         except Exception as e:
-            return f"Unexpected error: {e}"
+            return f"Unexpected error: {e}", False

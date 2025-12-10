@@ -28,7 +28,7 @@ class GeminiAPI:
                 model=self.gemini_model,
                 contents=query
             )
-            return response.text
+            return response.text, False
 
         except Exception as e:  # Catch ALL exceptions for now
             print(f"❌ Gemini API Error: {e}")  # Log the FULL exception for debugging
@@ -41,7 +41,7 @@ class GeminiAPI:
                     return self.get_response(query, retry_count + 1, max_retries)
                 else:
                     print(f"❌ Max retries reached for Gemini API (RESOURCE_EXHAUSTED). Giving up.")
-                    return ""
+                    return "", False
             else:  # If it is some other exception, we do not retry
                 print(f"❌ Other Gemini API Error. Not retrying.")
-                return ""
+                return "", False

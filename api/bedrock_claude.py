@@ -151,7 +151,7 @@ class BedrockClaudeAPI:
     def get_response(self, prompt, debug=False):
         """Fetch AI response from Claude via AWS Bedrock."""
         try:
-            return self._make_bedrock_request(prompt, debug)
+            return self._make_bedrock_request(prompt, debug), False
         except Exception as e:
             # Check if this is a token expiration error
             if self._is_token_expired_error(e):
@@ -160,16 +160,16 @@ class BedrockClaudeAPI:
                     # Re-initialize AWS session with fresh SSO login
                     self._refresh_aws_session()
                     # Retry the request with fresh credentials
-                    return self._make_bedrock_request(prompt, debug)
+                    return self._make_bedrock_request(prompt, debug), False
                 except Exception as retry_error:
                     error_message = f"Bedrock Claude API Error after re-authentication: {str(retry_error)}"
                     self.logger.error(error_message)
-                    return self._format_error_message(retry_error)
+                    return self._format_error_message(retry_error), False
             else:
                 # Handle other types of errors normally
                 error_message = f"Bedrock Claude API Error: {str(e)}"
                 self.logger.error(error_message)
-                return self._format_error_message(e)
+                return self._format_error_message(e), False
 
     def _is_token_expired_error(self, error):
         """Check if the error is related to expired SSO token."""

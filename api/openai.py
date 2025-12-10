@@ -29,9 +29,9 @@ class OpenAIAPI:
             if debug:
                 print(f"OpenAI response received: {len(response.choices[0].message.content)} characters")
 
-            return response.choices[0].message.content
+            return response.choices[0].message.content, False
         except Exception as e:
             error_message = f"OpenAI API Error: {str(e)}"
             if debug:
                 print(error_message)
-            return error_message
+            return error_message, False
