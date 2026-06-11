@@ -144,6 +144,10 @@ class BedrockClaudeAdvancedAPI:
         try:
             models = self.client.list_available_models(foundation_model=True, by_provider="Anthropic")
             
+            # Models known to require special config (data retention, etc.)
+            # Exclude these to avoid confusing errors
+            excluded_patterns = ['fable']
+            
             valid_models = []
             for m in models:
                 model_id = m.get('modelId', '')
@@ -157,6 +161,10 @@ class BedrockClaudeAdvancedAPI:
                 
                 # Skip legacy/EOL models
                 if lifecycle_status in ('LEGACY', 'EOL'):
+                    continue
+                
+                # Skip models with known extra requirements
+                if any(p in model_id.lower() for p in excluded_patterns):
                     continue
                 
                 # Determine the correct invocation ID
