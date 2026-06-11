@@ -94,9 +94,9 @@ class BedrockClaudeAPI:
         # Extract AWS configuration
         aws_config = config.get("aws", {})
         
-        # Support both SSO profile-based and direct credential configurations
-        if aws_config and "profile_name" in aws_config:
-            # Use SSO profile-based authentication (recommended)
+        # Support SSO profile, direct credentials, and default credential chain
+        if aws_config and "profile_name" in aws_config and aws_config["profile_name"]:
+            # Use SSO profile-based authentication
             self.profile_name = aws_config.get("profile_name")
             self.region_name = aws_config.get("region_name", "us-east-1")
             self.iam_role = aws_config.get("iam_role")  # Optional for logging
@@ -113,7 +113,7 @@ class BedrockClaudeAPI:
                 raise
                 
         elif "aws_access_key_id" in config:
-            # Fallback to direct credential authentication
+            # Direct credential authentication
             self.aws_access_key_id = config.get("aws_access_key_id")
             self.aws_secret_access_key = config.get("aws_secret_access_key")
             self.region_name = config.get("region_name", "us-east-1")
@@ -131,7 +131,21 @@ class BedrockClaudeAPI:
                 self.logger.error(f"Failed to initialize Bedrock client: {e}")
                 raise
         else:
-            raise ValueError("Invalid configuration: must provide either 'aws.profile_name' or 'aws_access_key_id'")
+            # Default credential chain: env vars, ~/.aws/credentials, instance profile
+            self.region_name = aws_config.get("region_name", "us-east-1")
+            self.model_id = config.get("model_id", "anthropic.claude-3-sonnet-20240229-v1:0")
+            
+            try:
+                self.session = boto3.Session(region_name=self.region_name)
+                self.session.client('sts').get_caller_identity()
+                self.logger.info("Initialized AWS session using default credential chain")
+            except Exception as e:
+                self.logger.error(f"Failed to initialize AWS session: {e}")
+                raise ValueError(
+                    f"No valid AWS credentials found. Set AWS_ACCESS_KEY_ID + "
+                    f"AWS_SECRET_ACCESS_KEY env vars or configure ~/.aws/credentials. "
+                    f"Error: {e}"
+                )
         
         # Create Bedrock clients
         try:

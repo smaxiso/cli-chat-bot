@@ -1,3 +1,5 @@
 conversations/
+cache/
 __pycache__/
 *.pyc
+.kiro/

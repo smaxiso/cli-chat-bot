@@ -8,6 +8,8 @@ and provides a compatible interface with the existing text-to-speech application
 import sys
 import os
 import logging
+import json
+import time
 
 # Add bedrock_api to Python path
 bedrock_api_path = os.path.join(os.path.dirname(__file__), '..', 'bedrock_api')
@@ -44,9 +46,7 @@ class BedrockClaudeAdvancedAPI:
                    Expected format:
                    {
                        "aws": {
-                           "profile_name": "...",
-                           "region_name": "...",
-                           "iam_role": "..."
+                           "region_name": "..."
                        },
                        "model_id": "..."
                    }
@@ -67,6 +67,15 @@ class BedrockClaudeAdvancedAPI:
         except Exception as e:
             self.logger.error(f"Failed to initialize Bedrock client: {e}")
             raise
+        
+        # Check if we're quick-resuming with a specific model
+        resume_model = config.get("_resume_model_id")
+        if resume_model:
+            self.client.model_id = resume_model
+            print(f"✓ Resumed with model: {resume_model}")
+        else:
+            # Prompt user to select a model from available Bedrock models
+            self._prompt_model_selection()
         
         # Use shared conversation manager if provided, otherwise use client's manager
         if conversation_manager:
@@ -90,6 +99,139 @@ class BedrockClaudeAdvancedAPI:
         
         self.logger.info("Advanced Bedrock API initialized with conversation management")
     
+    def _prompt_model_selection(self):
+        """Fetch available models from Bedrock (with caching) and let user choose."""
+        valid_models = self._get_cached_or_fetch_models()
+        
+        if not valid_models:
+            print(f"No active models found. Using default: {self.client.model_id}")
+            return
+        
+        # Display available models
+        self._display_model_list(valid_models)
+        
+        # Prompt selection
+        self._do_model_selection(valid_models)
+    
+    def _get_cached_or_fetch_models(self):
+        """Get models from cache or fetch from API. Cache for 3 days."""
+        cache_dir = os.path.join(os.path.dirname(__file__), '..', 'cache')
+        os.makedirs(cache_dir, exist_ok=True)
+        cache_file = os.path.join(cache_dir, 'bedrock_models_cache.json')
+        cache_ttl_seconds = 3 * 24 * 60 * 60  # 3 days
+        
+        # Try loading from cache
+        if os.path.exists(cache_file):
+            try:
+                with open(cache_file, 'r') as f:
+                    cached = json.load(f)
+                
+                cached_at = cached.get('cached_at', 0)
+                if (time.time() - cached_at) < cache_ttl_seconds:
+                    models = cached.get('models', [])
+                    if models:
+                        print("\nUsing cached model list (use /refresh-models to update)")
+                        return models
+            except (json.JSONDecodeError, IOError):
+                pass
+        
+        # Fetch from API
+        return self._fetch_and_cache_models(cache_file)
+    
+    def _fetch_and_cache_models(self, cache_file=None):
+        """Fetch models from Bedrock API, cache them, return processed list."""
+        print("\nFetching available models from Bedrock...")
+        try:
+            models = self.client.list_available_models(foundation_model=True, by_provider="Anthropic")
+            
+            valid_models = []
+            for m in models:
+                model_id = m.get('modelId', '')
+                model_name = m.get('modelName', model_id)
+                lifecycle_status = m.get('modelLifecycle', {}).get('status', '').upper()
+                inference_types = m.get('inferenceTypesSupported', [])
+                
+                # Skip embedding, image, video models
+                if any(x in model_id.lower() for x in ['embed', 'image', 'video']):
+                    continue
+                
+                # Skip legacy/EOL models
+                if lifecycle_status in ('LEGACY', 'EOL'):
+                    continue
+                
+                # Determine the correct invocation ID
+                if 'ON_DEMAND' in inference_types:
+                    invocation_id = model_id
+                    note = ""
+                else:
+                    invocation_id = f"us.{model_id}"
+                    note = " (inference profile)"
+                
+                valid_models.append({
+                    'id': invocation_id,
+                    'name': f"{model_name}{note}",
+                    'raw_id': model_id
+                })
+            
+            # Save to cache
+            if valid_models and cache_file:
+                try:
+                    with open(cache_file, 'w') as f:
+                        json.dump({
+                            'cached_at': time.time(),
+                            'models': valid_models
+                        }, f, indent=2)
+                except IOError as e:
+                    self.logger.debug(f"Could not write model cache: {e}")
+            
+            return valid_models
+            
+        except Exception as e:
+            print(f"Could not list models ({e}).")
+            return []
+    
+    def _display_model_list(self, valid_models):
+        """Display model list to user."""
+        print("\n" + "=" * 70)
+        print("Available Bedrock Models:")
+        print("-" * 70)
+        for i, m in enumerate(valid_models, 1):
+            marker = " ← current" if m['id'] == self.client.model_id else ""
+            print(f"  {i}. {m['name']}")
+            print(f"     {m['id']}{marker}")
+        print("=" * 70)
+    
+    def _do_model_selection(self, valid_models):
+        """Prompt user to select from model list."""
+        while True:
+            choice = input("\nSelect model (number) or press Enter for current: ").strip()
+            
+            if not choice:
+                print(f"Using: {self.client.model_id}")
+                return
+            
+            if choice.isdigit():
+                idx = int(choice) - 1
+                if 0 <= idx < len(valid_models):
+                    selected = valid_models[idx]['id']
+                    self.client.model_id = selected
+                    print(f"✓ Model set to: {selected}")
+                    return
+            
+            print("Invalid selection. Enter a number from the list.")
+    
+    def switch_model(self):
+        """Re-run model selection (called from /switch-model command)."""
+        self._prompt_model_selection()
+    
+    def refresh_models(self):
+        """Force refresh model cache and re-select."""
+        cache_dir = os.path.join(os.path.dirname(__file__), '..', 'cache')
+        cache_file = os.path.join(cache_dir, 'bedrock_models_cache.json')
+        if os.path.exists(cache_file):
+            os.remove(cache_file)
+        self._prompt_model_selection()
+    
     def _convert_config(self, config):
         """
         Convert text-to-speech config format to bedrock_api format.
@@ -103,7 +245,7 @@ class BedrockClaudeAdvancedAPI:
         bedrock_config = {
             "aws": config.get("aws", {}),
             "bedrock": {
-                "model_id": config.get("model_id", "anthropic.claude-3-5-sonnet-20240620-v1:0"),
+                "model_id": config.get("model_id", "anthropic.claude-3-haiku-20240307-v1:0"),
                 "default_temperature": 0.7,
                 "default_top_p": 0.9,
                 "default_max_tokens": 1024,
@@ -111,10 +253,7 @@ class BedrockClaudeAdvancedAPI:
                 "conversation_trim_strategy": "smart",
                 "reserve_tokens": 1000
             },
-            "sso": {
-                "sso_script_path": "/Users/sumit.kumar/Documents/utils/automations/aws_sso_login.sh",
-                "login_timeout": 300
-            }
+            "sso": config.get("sso", {})
         }
         return bedrock_config
     

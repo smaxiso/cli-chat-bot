@@ -33,9 +33,9 @@ class BedrockClient:
         bedrock_config = config.get("bedrock", {})
         sso_config = config.get("sso", {})
         
-        # Support both SSO profile-based and direct credential configurations
+        # Support SSO profile, direct credentials, and default credential chain
         if aws_config and "profile_name" in aws_config:
-            # Use SSO profile-based authentication (recommended)
+            # Use SSO profile-based authentication
             self.profile_name = aws_config.get("profile_name")
             self.region_name = aws_config.get("region_name", "us-east-1")
             self.iam_role = aws_config.get("iam_role")  # Optional for logging
@@ -62,7 +62,7 @@ class BedrockClient:
                 raise
                 
         elif "aws_access_key_id" in config:
-            # Fallback to direct credential authentication
+            # Direct credential authentication (keys at config root)
             self.aws_access_key_id = config.get("aws_access_key_id")
             self.aws_secret_access_key = config.get("aws_secret_access_key")
             self.region_name = config.get("region_name", "us-east-1")
@@ -79,10 +79,28 @@ class BedrockClient:
                 self.logger.error(f"Failed to initialize AWS session: {e}")
                 raise
         else:
-            raise ValueError(
-                "Invalid configuration: must provide either 'aws.profile_name' "
-                "or 'aws_access_key_id'"
-            )
+            # Default credential chain: picks up AWS_ACCESS_KEY_ID,
+            # AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN from env, or
+            # ~/.aws/credentials, or instance profile, etc.
+            self.region_name = aws_config.get("region_name", "us-east-1")
+            try:
+                self.session = boto3.Session(region_name=self.region_name)
+                # Validate credentials are available
+                self.session.client('sts').get_caller_identity()
+                self.logger.info(
+                    "Initialized AWS session using default credential chain "
+                    "(env vars / ~/.aws/credentials / instance profile)"
+                )
+            except Exception as e:
+                self.logger.error(f"Failed to initialize AWS session: {e}")
+                raise ValueError(
+                    "No valid AWS credentials found. Provide one of:\n"
+                    "  1. 'aws.profile_name' in config (SSO)\n"
+                    "  2. 'aws_access_key_id' in config (direct keys)\n"
+                    "  3. AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY env vars\n"
+                    "  4. ~/.aws/credentials file\n"
+                    f"Original error: {e}"
+                )
         
         # Get Bedrock configuration
         self.model_id = bedrock_config.get(
@@ -325,6 +343,20 @@ class BedrockClient:
             self.logger.error(f"Failed to refresh AWS session: {e}")
             raise RuntimeError(f"Failed to refresh AWS session: {e}")
     
+    def _is_extended_thinking_model(self, model_id):
+        """
+        Check if model doesn't support temperature/top_p parameters.
+        
+        Claude 4.x+ and some newer models deprecate these params.
+        """
+        model_lower = model_id.lower()
+        # Models that don't accept temperature: Claude 4.x+, Opus 4.x+, Sonnet 4.x+, Fable, etc.
+        no_temp_patterns = [
+            'claude-opus-4', 'claude-sonnet-4', 'claude-haiku-4',
+            'claude-fable', 'claude-opus-4-', 'claude-sonnet-4-',
+        ]
+        return any(pattern in model_lower for pattern in no_temp_patterns)
+    
     def clear_conversation(self):
         """Clear the conversation history."""
         count = self.conversation_manager.clear()
@@ -401,13 +433,19 @@ class BedrockClient:
                     ]
                 }]
             
-            body = json.dumps({
+            body_dict = {
                 "anthropic_version": "bedrock-2023-05-31",
                 "max_tokens": max_tokens,
-                "temperature": temperature,
-                "top_p": top_p,
                 "messages": messages
-            })
+            }
+            
+            # Only include temperature/top_p for models that support them
+            # Claude 4.x+ models deprecate temperature parameter
+            if not self._is_extended_thinking_model(model_id):
+                body_dict["temperature"] = temperature
+                body_dict["top_p"] = top_p
+            
+            body = json.dumps(body_dict)
         
         if debug:
             self.logger.debug(f"Invoking Bedrock model: {model_id}")
@@ -514,13 +552,18 @@ class BedrockClient:
                     ]
                 }]
             
-            body = json.dumps({
+            body_dict = {
                 "anthropic_version": "bedrock-2023-05-31",
                 "max_tokens": max_tokens,
-                "temperature": temperature,
-                "top_p": top_p,
                 "messages": messages
-            })
+            }
+            
+            # Only include temperature/top_p for models that support them
+            if not self._is_extended_thinking_model(model_id):
+                body_dict["temperature"] = temperature
+                body_dict["top_p"] = top_p
+            
+            body = json.dumps(body_dict)
         
         if debug:
             self.logger.debug(f"Invoking Bedrock model with streaming: {model_id}")
@@ -686,8 +729,13 @@ class BedrockClient:
             for model in models:
                 model_id = model.get('modelId', '').lower()
                 
-                # Exclude embedding and image models
+                # Exclude embedding, image, and rerank models
                 if any(exclude in model_id for exclude in ['embed', 'image', 'rerank']):
+                    continue
+                
+                # Exclude legacy/EOL models by lifecycle status
+                lifecycle_status = model.get('modelLifecycle', {}).get('status', '').upper()
+                if lifecycle_status in ('LEGACY', 'EOL'):
                     continue
                 
                 # Include common Gen AI model prefixes
@@ -697,18 +745,8 @@ class BedrockClient:
                     # Check if model supports on-demand inference
                     if on_demand_only:
                         inference_types = model.get('inferenceTypesSupported', [])
-                        # If inferenceTypesSupported is empty or contains 'ON_DEMAND', include it
-                        # Some models may not have this field, so we'll include them but mark them
                         if not inference_types or 'ON_DEMAND' in inference_types:
                             gen_ai_models.append(model)
-                        # Exclude known inference-profile-only models
-                        elif any(profile_only in model_id for profile_only in [
-                            'claude-opus-4-5', 'claude-opus-4-1', 'claude-sonnet-4-5'
-                        ]):
-                            continue
-                        else:
-                            # If it has inference types but no ON_DEMAND, exclude it
-                            continue
                     else:
                         gen_ai_models.append(model)
             

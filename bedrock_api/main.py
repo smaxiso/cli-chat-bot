@@ -235,12 +235,26 @@ You can also use command-line arguments:
                         continue
                     
                     if prompt_clean == '/models':
+                        # Show configured models first
+                        available_models = config.get("bedrock", {}).get("available_models", [])
+                        if available_models:
+                            print("\n" + "=" * 70)
+                            print("Configured Models (from config.json):")
+                            print("-" * 70)
+                            for m in available_models:
+                                marker = " ← current" if m["id"] == current_model else ""
+                                print(f"  {m['id']}")
+                                print(f"    {m.get('name', '')} - {m.get('description', '')}{marker}")
+                            print("=" * 70)
+                            print("Use: /use-model <model_id> to switch\n")
+                        
+                        # Also offer to fetch from Bedrock API
                         try:
-                            print("\nFetching available Gen AI models (on-demand only)...")
+                            print("Fetching available Gen AI models from Bedrock API (on-demand only)...")
                             models = client.list_gen_ai_models(provider=args.provider, on_demand_only=True)
                             print(client.format_models_list(models, show_on_demand=True))
                         except Exception as e:
-                            print(f"Error listing models: {e}\n")
+                            print(f"(Could not fetch remote model list: {e})\n")
                         continue
                     
                     # Detect if user typed a model ID as prompt (starts with provider.model format)

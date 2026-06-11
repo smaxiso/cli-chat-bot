@@ -22,20 +22,16 @@
   "bedrock_claude": {
     "class_name": "BedrockClaudeAPI",
     "aws": {
-      "profile_name": "profile_name",
-      "region_name": "us-east-1",
-      "iam_role": "arn:aws:iam::project_id:role/profile_name-role"
+      "region_name": "us-east-1"
     },
     "model_id": "anthropic.claude-3-sonnet-20240229-v1:0"
   },
   "bedrock_claude_advanced": {
     "class_name": "BedrockClaudeAdvancedAPI",
     "aws": {
-      "profile_name": "profile_name",
-      "region_name": "us-east-1",
-      "iam_role": "arn:aws:iam::project_id:role/profile_name-role"
+      "region_name": "us-east-1"
     },
-    "model_id": "anthropic.claude-3-5-sonnet-20240620-v1:0"
+    "model_id": "anthropic.claude-3-haiku-20240307-v1:0"
   },
   "ollama": {
     "class_name": "OllamaAPI",

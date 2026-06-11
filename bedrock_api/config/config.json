@@ -1,21 +1,41 @@
 {
   "aws": {
-    "profile_name": "profile_name",
-    "region_name": "us-east-1",
-    "iam_role": "arn:aws:iam::project_id:role/project_name"
+    "region_name": "us-east-1"
   },
-        "bedrock": {
-            "model_id": "anthropic.claude-3-5-sonnet-20240620-v1:0",
-            "default_temperature": 0.7,
-            "default_top_p": 0.9,
-            "default_max_tokens": 1024,
-            "max_conversation_tokens": 160000,
-            "conversation_trim_strategy": "smart",
-            "reserve_tokens": 1000
-        },
-  "sso": {
-    "sso_script_path": "/Users/sumit.kumar/Documents/utils/automations/aws_sso_login.sh",
-    "login_timeout": 300
+  "bedrock": {
+    "model_id": "anthropic.claude-3-5-sonnet-20240620-v1:0",
+    "available_models": [
+      {
+        "id": "anthropic.claude-3-5-sonnet-20240620-v1:0",
+        "name": "Claude 3.5 Sonnet",
+        "description": "Best balance of intelligence and speed"
+      },
+      {
+        "id": "anthropic.claude-3-haiku-20240307-v1:0",
+        "name": "Claude 3 Haiku",
+        "description": "Fastest, cheapest - good for simple tasks"
+      },
+      {
+        "id": "anthropic.claude-3-sonnet-20240229-v1:0",
+        "name": "Claude 3 Sonnet",
+        "description": "Previous generation sonnet"
+      },
+      {
+        "id": "us.anthropic.claude-sonnet-4-20250514-v1:0",
+        "name": "Claude Sonnet 4",
+        "description": "Latest Claude 4 Sonnet"
+      },
+      {
+        "id": "amazon.titan-text-express-v1",
+        "name": "Titan Text Express",
+        "description": "Amazon's fast text model"
+      }
+    ],
+    "default_temperature": 0.7,
+    "default_top_p": 0.9,
+    "default_max_tokens": 1024,
+    "max_conversation_tokens": 160000,
+    "conversation_trim_strategy": "smart",
+    "reserve_tokens": 1000
   }
 }
-

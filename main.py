@@ -1,4 +1,5 @@
 import argparse
+import json
 import logging
 import sys
 import os
@@ -49,6 +50,8 @@ class AIChatbot:
         os.makedirs(self.conversations_dir, exist_ok=True)
         self.current_conversation_name = None
         self.current_conversation_file = None
+        self._quick_resume_session = None
+        self._resume_model_id = None
 
         # Cache directory (separate from conversations)
         self.cache_dir = os.path.join(os.path.dirname(__file__), "cache")
@@ -99,8 +102,17 @@ class AIChatbot:
         # Handle conversation session on startup
         self._handle_conversation_startup()
 
-        # Select API
-        self.select_api(api_name)
+        # Select API (use quick resume if available)
+        quick_resume = getattr(self, '_quick_resume_session', None)
+        if quick_resume:
+            resume_api = quick_resume.get('api_name')
+            resume_model = quick_resume.get('model_id')
+            # Temporarily store model for the API init to pick up
+            self._resume_model_id = resume_model
+            self.select_api(resume_api or api_name)
+            self._resume_model_id = None
+        else:
+            self.select_api(api_name)
 
     def select_api(self, api_name=None):
         """Handles API selection and initialization."""
@@ -130,6 +142,11 @@ class AIChatbot:
             elif "model_id" in self.api_config:
                 print(TerminalFormatter.format_system_message(f"Overriding default model_id with: {self.model}"))
                 self.api_config["model_id"] = self.model
+
+        # If quick-resuming, inject the resume model and set skip flag
+        resume_model = getattr(self, '_resume_model_id', None)
+        if resume_model:
+            self.api_config["_resume_model_id"] = resume_model
 
         try:
             # Try to initialize with shared conversation manager
@@ -197,11 +214,19 @@ class AIChatbot:
     def _handle_conversation_startup(self):
         """Handle conversation selection on startup."""
         conversations = self._list_conversations()
+        last_session = self._load_last_session()
         
         # Show startup menu
         print("\n" + "=" * 70)
         print("Welcome! What would you like to do?")
         print("=" * 70)
+        if last_session and conversations:
+            last_api = last_session.get('api_name', '?')
+            last_model = last_session.get('model_id', '?')
+            last_conv = last_session.get('conversation_name', '?')
+            # Truncate model ID for display
+            model_display = last_model.split('.')[-1] if '.' in last_model else last_model
+            print(f"0. Quick resume [{last_api} / {model_display} / {last_conv}]")
         if conversations:
             print("1. Continue last conversation")
             print("2. Start new conversation")
@@ -212,10 +237,28 @@ class AIChatbot:
         
         while True:
             try:
-                if conversations:
+                if last_session and conversations:
+                    choice = input("\nEnter your choice (0-3): ").strip()
+                elif conversations:
                     choice = input("\nEnter your choice (1-3): ").strip()
                 else:
                     choice = input("\nEnter your choice (1): ").strip()
+                
+                if choice == "0" and last_session and conversations:
+                    # Quick resume: load last conversation + set API/model for auto-selection
+                    conv_name = last_session.get('conversation_name')
+                    if conv_name:
+                        self._load_conversation(conv_name)
+                        print(TerminalFormatter.format_system_message(f"\n✓ Loaded conversation: {conv_name}"))
+                    else:
+                        # Fallback to most recent
+                        last_conv = max(conversations, key=lambda x: x["last_updated"])
+                        self._load_conversation(last_conv["name"])
+                        print(TerminalFormatter.format_system_message(f"\n✓ Loaded conversation: {last_conv['name']}"))
+                    
+                    # Store session info for select_api to use
+                    self._quick_resume_session = last_session
+                    break
                 
                 if choice == "1":
                     if conversations:
@@ -444,6 +487,46 @@ class AIChatbot:
                 if self.debug:
                     logging.error(f"Failed to save conversation: {e}")
 
+    def _save_last_session(self):
+        """Save last used API, model, and conversation name for quick resume."""
+        session_file = os.path.join(os.path.dirname(__file__), 'cache', 'last_session.json')
+        os.makedirs(os.path.dirname(session_file), exist_ok=True)
+        
+        model_id = None
+        if hasattr(self, 'api_instance'):
+            if hasattr(self.api_instance, 'client') and hasattr(self.api_instance.client, 'model_id'):
+                model_id = self.api_instance.client.model_id
+            elif hasattr(self.api_instance, 'model_id'):
+                model_id = self.api_instance.model_id
+        
+        session_data = {
+            'api_name': self.api_name,
+            'model_id': model_id,
+            'conversation_name': self.current_conversation_name,
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        try:
+            with open(session_file, 'w') as f:
+                json.dump(session_data, f, indent=2)
+        except IOError:
+            pass
+    
+    def _load_last_session(self):
+        """Load last session info for quick resume."""
+        session_file = os.path.join(os.path.dirname(__file__), 'cache', 'last_session.json')
+        if not os.path.exists(session_file):
+            return None
+        try:
+            with open(session_file, 'r') as f:
+                data = json.load(f)
+            # Validate it has required fields
+            if data.get('api_name') and data.get('model_id'):
+                return data
+            return None
+        except (json.JSONDecodeError, IOError):
+            return None
+
     def run(self):
         """Main interactive loop."""
         print(TerminalFormatter.format_system_message("\nWelcome to the AI Chatbot with TTS!"))
@@ -523,8 +606,33 @@ class AIChatbot:
                             print("=" * 70)
                     print(TerminalFormatter.format_system_message("\nSwitching API..."))
                     print(TerminalFormatter.format_system_message("Note: Conversation context is preserved when switching back."))
+                    # Remove cached instance so re-selection triggers model prompt
+                    if self.api_name in self.api_instances:
+                        del self.api_instances[self.api_name]
                     self.select_api()
                     first_query = True
+                    continue
+
+                if query_clean == '/switch-model':
+                    if hasattr(self.api_instance, 'switch_model'):
+                        self.api_instance.switch_model()
+                    elif hasattr(self.api_instance, 'client') and hasattr(self.api_instance.client, 'model_id'):
+                        # Direct model ID input for APIs without switch_model
+                        new_model = input("Enter model ID: ").strip()
+                        if new_model:
+                            self.api_instance.client.model_id = new_model
+                            print(TerminalFormatter.format_system_message(f"\n✓ Model set to: {new_model}\n"))
+                        else:
+                            print(TerminalFormatter.format_system_message(f"\nKept current model: {self.api_instance.client.model_id}\n"))
+                    else:
+                        print(TerminalFormatter.format_error("\nModel switching not supported for this API.\n"))
+                    continue
+
+                if query_clean == '/refresh-models':
+                    if hasattr(self.api_instance, 'refresh_models'):
+                        self.api_instance.refresh_models()
+                    else:
+                        print(TerminalFormatter.format_error("\nModel refresh not supported for this API.\n"))
                     continue
 
                 if query_clean in ['/stream', '/stream-on', '/stream-off', '/no-stream']:
@@ -727,6 +835,9 @@ class AIChatbot:
                 # Auto-save conversation after each exchange
                 if self.shared_conversation_manager:
                     self._save_current_conversation()
+                
+                # Save session state for quick resume
+                self._save_last_session()
 
                 if self.enable_tts:
                     self.tts_manager.speak_text(response)
@@ -805,6 +916,7 @@ class AIChatbot:
     - /exit, /quit         - Exit the application
     - /help                - Show this help message
     - /switch              - Change the API at runtime
+    - /switch-model        - Change model for current API
     - /stream, /stream-on  - Enable streaming responses
     - /stream-off, /no-stream - Disable streaming responses
     - /tts, /tts-on        - Enable text-to-speech
